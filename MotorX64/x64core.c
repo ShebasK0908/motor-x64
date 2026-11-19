@@ -12,13 +12,23 @@ static bool mem_ok(X64Cpu *c, uint64_t a, unsigned n) {
 }
 static uint64_t mem_rd(X64Cpu *c, uint64_t a, unsigned n, bool *ok) {
     if (!mem_ok(c, a, n)) { *ok = false; return 0; }
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    uint64_t v = 0;
+    __builtin_memcpy(&v, c->mem + a, n); // anfitrion little-endian (x86/ARM): directo
+    return v;
+#else
     uint64_t v = 0;
     for (unsigned i = 0; i < n; i++) v |= (uint64_t)c->mem[a + i] << (8 * i);
     return v;
+#endif
 }
 static void mem_wr(X64Cpu *c, uint64_t a, uint64_t v, unsigned n, bool *ok) {
     if (!mem_ok(c, a, n)) { *ok = false; return; }
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    __builtin_memcpy(c->mem + a, &v, n);
+#else
     for (unsigned i = 0; i < n; i++) c->mem[a + i] = (uint8_t)(v >> (8 * i));
+#endif
 }
 
 // ---------- registros parciales ----------
@@ -96,9 +106,8 @@ static bool cond(X64Cpu *c, int cc) {
 // ---------- fetch ----------
 typedef struct { X64Cpu *c; bool err; } Fetch;
 static uint8_t f8(Fetch *f) {
-    bool ok = true; uint8_t v = (uint8_t)mem_rd(f->c, f->c->rip, 1, &ok);
-    if (!ok) { f->err = true; return 0; }
-    f->c->rip += 1; return v;
+    if (f->c->rip >= f->c->mem_size) { f->err = true; return 0; }
+    return f->c->mem[f->c->rip++];
 }
 static uint64_t fN(Fetch *f, unsigned n) {
     uint64_t v = 0;
