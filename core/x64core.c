@@ -681,6 +681,7 @@ typedef struct {
     uint8_t is_mem, rm_reg;
     uint8_t base_reg, idx_reg, scale; // 255 = ninguno; base 254 = EA absoluta en disp
     uint8_t has_rex, ssize;           // ssize: tam. fuente (MOVZX/SX) o flag op16 (CBW/CQO)
+    uint8_t regform;                  // v0.4: 1 si el operando r/m es un registro (mod==3)
     int64_t disp;
     uint64_t imm;
     uint64_t target;
@@ -726,6 +727,7 @@ static Form decode_form(Fetch *f, int rex) {
 static void dec_fill_form(Dec *d, Form *fm) {
     d->reg = (uint8_t)fm->reg;
     d->is_mem = fm->is_mem; d->rm_reg = fm->rm_reg;
+    d->regform = fm->is_mem ? 0 : 1;
     d->base_reg = fm->base_reg; d->idx_reg = fm->idx_reg;
     d->scale = fm->scale; d->disp = fm->disp;
 }
@@ -999,6 +1001,17 @@ static Block *cache_decode(X64Cpu *c, Cache *ch, uint64_t start) {
     return b;
 }
 
+// v0.4: via rapida registro-registro. Solo si el operando es un registro y
+// no hay registros de byte alto (AH/BH/CH/DH) de por medio: en ese caso
+// reg_rd/reg_wr directos son equivalentes a la via generica.
+static bool lean_ok(Dec *d, unsigned sz) {
+    if (!d->regform) return false;
+    if (sz == 1 && !d->has_rex &&
+        ((d->rm_reg >= 4 && d->rm_reg <= 7) || (d->reg >= 4 && d->reg <= 7)))
+        return false;
+    return true;
+}
+
 // ---------- ejecutor de bloques ----------
 // Devuelve el estado; c->rip queda en la siguiente direccion a ejecutar.
 static X64Status exec_block(X64Cpu *c, Block *b) {
@@ -1018,8 +1031,14 @@ static X64Status exec_block(X64Cpu *c, Block *b) {
             case K_SYSCALL:
                 if (c->r[X64_RAX] == 60) { c->exit_code = (int)c->r[X64_RDI]; c->rip = d->rip_next; return X64_HALT; }
                 c->bad_opcode = 0x05; c->bad_rip = d->rip; c->rip = d->rip; return X64_ERR_OPCODE;
-            case K_MOV_RM_R: dec_wr(c, d, dec_regrd(c, d, sz), sz, &ok); break;
-            case K_MOV_R_RM: { uint64_t v = dec_rd(c, d, sz, &ok); if (ok) dec_regwr(c, d, v, sz); } break;
+            case K_MOV_RM_R:
+                if (lean_ok(d, sz)) reg_wr(c, d->rm_reg, reg_rd(c, d->reg, sz), sz, false);
+                else dec_wr(c, d, dec_regrd(c, d, sz), sz, &ok);
+                break;
+            case K_MOV_R_RM:
+                if (lean_ok(d, sz)) reg_wr(c, d->reg, reg_rd(c, d->rm_reg, sz), sz, false);
+                else { uint64_t v = dec_rd(c, d, sz, &ok); if (ok) dec_regwr(c, d, v, sz); }
+                break;
             case K_MOV_RM_I: dec_wr(c, d, d->imm, sz, &ok); break;
             case K_MOV_R_I: c->r[d->reg] = d->imm; break;
             case K_MOV_R8_I:
@@ -1028,14 +1047,29 @@ static X64Status exec_block(X64Cpu *c, Block *b) {
                 break;
             case K_LEA: dec_regwr(c, d, dec_ea(c, d), sz); break;
             case K_ALU_RM_R: {
+                if (lean_ok(d, sz)) {
+                    uint64_t r = alu(c, d->which, reg_rd(c, d->rm_reg, sz), reg_rd(c, d->reg, sz), sz, true);
+                    if (d->which != 7) reg_wr(c, d->rm_reg, r, sz, false);
+                    break;
+                }
                 uint64_t r = alu(c, d->which, dec_rd(c, d, sz, &ok), dec_regrd(c, d, sz), sz, true);
                 if (ok && d->which != 7) dec_wr(c, d, r, sz, &ok);
                 break; }
             case K_ALU_R_RM: {
+                if (lean_ok(d, sz)) {
+                    uint64_t r = alu(c, d->which, reg_rd(c, d->reg, sz), reg_rd(c, d->rm_reg, sz), sz, true);
+                    if (d->which != 7) reg_wr(c, d->reg, r, sz, false);
+                    break;
+                }
                 uint64_t r = alu(c, d->which, dec_regrd(c, d, sz), dec_rd(c, d, sz, &ok), sz, true);
                 if (ok && d->which != 7) dec_regwr(c, d, r, sz);
                 break; }
             case K_ALU_RM_I: {
+                if (lean_ok(d, sz)) {
+                    uint64_t r = alu(c, d->which, reg_rd(c, d->rm_reg, sz), d->imm, sz, true);
+                    if (d->which != 7) reg_wr(c, d->rm_reg, r, sz, false);
+                    break;
+                }
                 uint64_t r = alu(c, d->which, dec_rd(c, d, sz, &ok), d->imm, sz, true);
                 if (ok && d->which != 7) dec_wr(c, d, r, sz, &ok);
                 break; }
@@ -1064,7 +1098,10 @@ static X64Status exec_block(X64Cpu *c, Block *b) {
             case K_PUSH_R: if (!push(c, c->r[d->reg])) return X64_ERR_MEM; break;
             case K_POP_R: { uint64_t v = pop(c, &ok); if (!ok) return X64_ERR_MEM; c->r[d->reg] = v; } break;
             case K_PUSH_I: if (!push(c, d->imm)) return X64_ERR_MEM; break;
-            case K_PUSH_RM: { uint64_t v = dec_rd(c, d, sz, &ok); if (!ok || !push(c, v)) return X64_ERR_MEM; } break;
+            case K_PUSH_RM: {
+                uint64_t v = lean_ok(d, sz) ? reg_rd(c, d->rm_reg, sz) : dec_rd(c, d, sz, &ok);
+                if (!ok || !push(c, v)) return X64_ERR_MEM;
+                } break;
             case K_CALL_RM: {
                 uint64_t t = dec_rd(c, d, sz, &ok); if (!ok) return X64_ERR_MEM;
                 if (!push(c, d->rip_next)) return X64_ERR_MEM;
