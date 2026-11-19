@@ -1,0 +1,4 @@
+build/
+motor-test
+*.o
+tests/*.bin

@@ -1,0 +1,43 @@
+name: Build iOS IPA (sin firmar)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Versión de Xcode
+        run: xcodebuild -version
+
+      - name: Compilar y empaquetar el .ipa
+        run: |
+          chmod +x build.sh package-ipa.sh
+          ./build.sh
+
+      - name: Subir el .ipa como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MotorX64-ipa
+          path: MotorX64.ipa
+          if-no-files-found: error
+
+      - name: Publicar en la Release motor-v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view motor-v1 >/dev/null 2>&1; then
+            gh release upload motor-v1 MotorX64.ipa --clobber
+          else
+            gh release create motor-v1 MotorX64.ipa \
+              --title "MotorX64 v0.1" \
+              --notes "MotorX64.ipa sin firmar. Instalalo con SideStore. Motor interprete x86-64 v0.1: ejecuta codigo x86-64 real; no es un emulador de PS5 completo."
+          fi

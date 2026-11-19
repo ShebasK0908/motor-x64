@@ -1,0 +1,67 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = { };
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		CC0000000000000000000000 /* MotorX64App.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000000 /* MotorX64App.swift */; };
+		CC0000000000000000000001 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000001 /* ContentView.swift */; };
+		CC0000000000000000000002 /* x64core.c in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000002 /* x64core.c */; };
+		CC0000000000000000000004 /* bridge.c in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000004 /* bridge.c */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		BB0000000000000000000000 /* MotorX64App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotorX64App.swift; sourceTree = "<group>"; };
+		BB0000000000000000000001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		BB0000000000000000000002 /* x64core.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = x64core.c; sourceTree = "<group>"; };
+		BB0000000000000000000003 /* x64core.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = x64core.h; sourceTree = "<group>"; };
+		BB0000000000000000000004 /* bridge.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = bridge.c; sourceTree = "<group>"; };
+		BB0000000000000000000005 /* bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bridge.h; sourceTree = "<group>"; };
+		BB0000000000000000000006 /* tests_data.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = tests_data.h; sourceTree = "<group>"; };
+		BB0000000000000000000007 /* MotorX64-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MotorX64-Bridging-Header.h; sourceTree = "<group>"; };
+		BB0000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA0000000000000000000006 /* MotorX64.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MotorX64.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AA0000000000000000000008 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AA0000000000000000000003 = {isa = PBXGroup; children = ( AA0000000000000000000004 /* MotorX64 */, AA0000000000000000000005 /* Products */, ); sourceTree = "<group>"; };
+		AA0000000000000000000004 /* MotorX64 */ = {isa = PBXGroup; children = ( BB0000000000000000000000 /* MotorX64App.swift */, BB0000000000000000000001 /* ContentView.swift */, BB0000000000000000000002 /* x64core.c */, BB0000000000000000000003 /* x64core.h */, BB0000000000000000000004 /* bridge.c */, BB0000000000000000000005 /* bridge.h */, BB0000000000000000000006 /* tests_data.h */, BB0000000000000000000007 /* MotorX64-Bridging-Header.h */, BB0000000000000000000008 /* Info.plist */, ); path = MotorX64; sourceTree = "<group>"; };
+		AA0000000000000000000005 /* Products */ = {isa = PBXGroup; children = ( AA0000000000000000000006 /* MotorX64.app */, ); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AA0000000000000000000002 /* MotorX64 */ = {isa = PBXNativeTarget; buildConfigurationList = AA000000000000000000000B /* Build configuration list for PBXNativeTarget "MotorX64" */; buildPhases = ( AA0000000000000000000007 /* Sources */, AA0000000000000000000008 /* Frameworks */, AA0000000000000000000009 /* Resources */, ); buildRules = ( ); dependencies = ( ); name = MotorX64; productName = MotorX64; productReference = AA0000000000000000000006 /* MotorX64.app */; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AA0000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = { LastUpgradeCheck = 1600; TargetAttributes = { AA0000000000000000000002 = { CreatedOnToolsVersion = 16.0; }; }; }; buildConfigurationList = AA000000000000000000000A /* Build configuration list for PBXProject "MotorX64" */; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = ( en, Base, ); mainGroup = AA0000000000000000000003; productRefGroup = AA0000000000000000000005 /* Products */; projectDirPath = ""; projectRoot = ""; targets = ( AA0000000000000000000002 /* MotorX64 */, ); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AA0000000000000000000009 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AA0000000000000000000007 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ( CC0000000000000000000000 /* MotorX64App.swift in Sources */, CC0000000000000000000001 /* ContentView.swift in Sources */, CC0000000000000000000002 /* x64core.c in Sources */, CC0000000000000000000004 /* bridge.c in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		AA000000000000000000000C /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		AA000000000000000000000D /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+		AA000000000000000000000E /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = MotorX64/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = dev.shebo.motorx64; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_OBJC_BRIDGING_HEADER = "MotorX64/MotorX64-Bridging-Header.h"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		AA000000000000000000000F /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = MotorX64/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = dev.shebo.motorx64; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_OBJC_BRIDGING_HEADER = "MotorX64/MotorX64-Bridging-Header.h"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		AA000000000000000000000A /* Build configuration list for PBXProject "MotorX64" */ = {isa = XCConfigurationList; buildConfigurations = ( AA000000000000000000000C /* Debug */, AA000000000000000000000D /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		AA000000000000000000000B /* Build configuration list for PBXNativeTarget "MotorX64" */ = {isa = XCConfigurationList; buildConfigurations = ( AA000000000000000000000E /* Debug */, AA000000000000000000000F /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = AA0000000000000000000001 /* Project object */;
+}
