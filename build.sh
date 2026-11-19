@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 xcodebuild \
   -project MotorX64.xcodeproj \
-  -target MotorX64 \
+  -scheme MotorX64 \
   -configuration Release \
   -sdk iphoneos \
   -derivedDataPath build/DerivedData \
