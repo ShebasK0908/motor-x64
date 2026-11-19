@@ -225,7 +225,9 @@ static uint64_t alu(X64Cpu *c, int which, uint64_t a, uint64_t b, unsigned size,
 
 // ---------- init / load ----------
 void x64_init(X64Cpu *cpu, uint8_t *mem, uint64_t mem_size, uint64_t entry) {
+    void *cache = cpu->cache; // la cache sobrevive al init; se vacia con x64_cache_clear
     memset(cpu, 0, sizeof(*cpu));
+    cpu->cache = cache;
     cpu->mem = mem; cpu->mem_size = mem_size;
     memset(mem, 0, mem_size);
     cpu->rip = entry;
@@ -646,5 +648,517 @@ X64Status x64_run(X64Cpu *c, uint64_t max_steps) {
         X64Status s = x64_step(c);
         if (s != X64_OK) return s;
         if (++n >= max_steps) return X64_ERR_STEPS;
+    }
+}
+
+// =====================================================================
+// v0.3 — Motor rapido: cache de bloques decodificados.
+// La primera vez que se ejecuta una direccion, el bloque (hasta la
+// siguiente instruccion de control de flujo, max. 64) se decodifica a
+// registros internos; despues se ejecutan los registros sin volver a
+// decodificar bytes. Las formas raras caen al interprete clasico
+// (registro K_STEP, siempre al final de su bloque). Sin soporte de
+// codigo automodificable: si el programa se reescribe, hay que vaciar
+// la cache con x64_cache_clear().
+// =====================================================================
+#include <stdlib.h>
+
+enum {
+    K_NOP, K_MOV_RM_R, K_MOV_R_RM, K_MOV_RM_I, K_MOV_R_I, K_MOV_R8_I, K_LEA,
+    K_ALU_RM_R, K_ALU_R_RM, K_ALU_RM_I, K_ALU_A_I,
+    K_TEST_RM_R, K_XCHG_RM_R, K_XCHG_A_R,
+    K_INC_RM, K_DEC_RM, K_CALL_RM, K_JMP_RM, K_PUSH_RM,
+    K_PUSH_R, K_POP_R, K_PUSH_I,
+    K_JMP, K_JCC, K_CALL, K_RET, K_RETI,
+    K_SHIFT_I, K_SHIFT_1, K_SHIFT_CL,
+    K_IMUL_R_RM, K_IMUL_R_RM_I, K_MOVZX, K_MOVSX, K_SETCC,
+    K_CBW, K_CQO,
+    K_HALT, K_SYSCALL, K_STEP, K_BAD
+};
+
+typedef struct {
+    uint8_t kind, osize, reg, which; // which: op ALU / op shift / cc / subop
+    uint8_t is_mem, rm_reg;
+    uint8_t base_reg, idx_reg, scale; // 255 = ninguno; base 254 = EA absoluta en disp
+    uint8_t has_rex, ssize;           // ssize: tam. fuente (MOVZX/SX) o flag op16 (CBW/CQO)
+    int64_t disp;
+    uint64_t imm;
+    uint64_t target;
+    uint64_t rip, rip_next;
+} Dec;
+
+typedef struct {
+    int reg;
+    uint8_t is_mem, rm_reg, base_reg, idx_reg, scale;
+    int64_t disp;
+} Form;
+
+// Como decode_modrm pero SIN calcular la direccion: guarda la forma.
+// RIP-relativo: base_reg=254 y disp=disp32 (se parchea al final de la
+// instruccion, cuando rip_next ya se conoce: mas correcto que el clasico).
+static Form decode_form(Fetch *f, int rex) {
+    X64Cpu *c = f->c;
+    Form fm; memset(&fm, 0, sizeof(fm));
+    uint8_t b = f8(f);
+    int mod = b >> 6, reg = (b >> 3) & 7, rm = b & 7;
+    fm.reg = reg | ((rex & 4) ? 8 : 0);
+    fm.rm_reg = rm | ((rex & 1) ? 8 : 0);
+    fm.base_reg = 255; fm.idx_reg = 255; fm.scale = 1; fm.is_mem = mod != 3;
+    if (mod == 3) return fm;
+    if (rm == 4) { // SIB
+        uint8_t sib = f8(f);
+        fm.scale = 1u << (sib >> 6);
+        if (((sib >> 3) & 7) != 4) fm.idx_reg = ((sib >> 3) & 7) | ((rex & 2) ? 8 : 0);
+        if ((sib & 7) == 5 && mod == 0) { fm.disp = fsN(f, 4); return fm; }
+        fm.base_reg = (sib & 7) | ((rex & 1) ? 8 : 0);
+    } else if (rm == 5 && mod == 0) { // RIP + disp32
+        fm.base_reg = 254;
+        fm.disp = fsN(f, 4);
+        return fm;
+    } else {
+        fm.base_reg = fm.rm_reg;
+    }
+    if (mod == 1) fm.disp = fsN(f, 1);
+    else if (mod == 2) fm.disp = fsN(f, 4);
+    return fm;
+}
+
+static void dec_fill_form(Dec *d, Form *fm) {
+    d->reg = (uint8_t)fm->reg;
+    d->is_mem = fm->is_mem; d->rm_reg = fm->rm_reg;
+    d->base_reg = fm->base_reg; d->idx_reg = fm->idx_reg;
+    d->scale = fm->scale; d->disp = fm->disp;
+}
+
+// Decodifica UNA instruccion en un registro. Devuelve false si el fetch
+// sale de la memoria. Lo no soportado -> K_BAD; formas raras -> K_STEP.
+static bool decode_one(X64Cpu *c, Dec *d) {
+    Fetch f = { c, false };
+    memset(d, 0, sizeof(*d));
+    d->rip = c->rip;
+    d->base_reg = 255; d->idx_reg = 255; d->scale = 1;
+    bool op16 = false;
+    int rex = 0;
+    uint8_t op;
+    for (;;) {
+        op = f8(&f);
+        if (f.err) return false;
+        if (op == 0x66) { op16 = true; continue; }
+        if (op == 0x67) continue;
+        if (op == 0xF2 || op == 0xF3) continue;
+        if (op >= 0x40 && op <= 0x4F) { rex = op; continue; }
+        if (op == 0x2E || op == 0x3E || op == 0x26 || op == 0x64 || op == 0x65) continue;
+        break;
+    }
+    bool has_rex = rex != 0;
+    unsigned osize = (rex & 8) ? 8 : (op16 ? 2 : 4);
+    d->osize = (uint8_t)osize; d->has_rex = has_rex;
+    Form fm; bool have_form = false;
+
+#define FORM() do { fm = decode_form(&f, rex); have_form = true; dec_fill_form(d, &fm); if (f.err) return false; } while (0)
+#define FINISH() do { d->rip_next = c->rip; if (have_form && d->base_reg == 254) d->disp = (int64_t)(d->rip_next + (uint64_t)d->disp); return true; } while (0)
+#define BAD() do { d->kind = K_BAD; d->imm = op; FINISH(); } while (0)
+#define STEP() do { d->kind = K_STEP; FINISH(); } while (0)
+
+    if (op >= 0x50 && op <= 0x57) { d->kind = K_PUSH_R; d->reg = (op - 0x50) | ((rex & 1) ? 8 : 0); FINISH(); }
+    if (op >= 0x58 && op <= 0x5F) { d->kind = K_POP_R; d->reg = (op - 0x58) | ((rex & 1) ? 8 : 0); FINISH(); }
+    if (op >= 0x91 && op <= 0x97) { d->kind = K_XCHG_A_R; d->reg = (op - 0x90) | ((rex & 1) ? 8 : 0); FINISH(); }
+    if (op >= 0xB0 && op <= 0xB7) { d->kind = K_MOV_R8_I; d->reg = (op - 0xB0) | ((rex & 1) ? 8 : 0); d->imm = f8(&f); if (f.err) return false; FINISH(); }
+    if (op >= 0xB8 && op <= 0xBF) {
+        d->kind = K_MOV_R_I; d->reg = (op - 0xB8) | ((rex & 1) ? 8 : 0);
+        uint64_t v = (rex & 8) ? fN(&f, 8) : fN(&f, 4);
+        if (f.err) return false;
+        d->imm = (rex & 8) ? v : (v & 0xFFFFFFFFull);
+        FINISH();
+    }
+    if (op >= 0x70 && op <= 0x7F) {
+        int64_t disp = fsN(&f, 1); if (f.err) return false;
+        d->kind = K_JCC; d->which = op & 0xF; d->rip_next = c->rip;
+        d->target = c->rip + (uint64_t)disp;
+        return true;
+    }
+
+    switch (op) {
+        case 0x90: d->kind = K_NOP; FINISH();
+        case 0xF4: d->kind = K_HALT; FINISH();
+        case 0x98: d->kind = K_CBW; d->ssize = op16 ? 1 : 0; FINISH();
+        case 0x99: d->kind = K_CQO; d->ssize = op16 ? 1 : 0; FINISH();
+        case 0x68: d->kind = K_PUSH_I; d->imm = (uint64_t)fsN(&f, 4); if (f.err) return false; FINISH();
+        case 0x6A: d->kind = K_PUSH_I; d->imm = (uint64_t)fsN(&f, 1); if (f.err) return false; FINISH();
+        case 0xC3: d->kind = K_RET; FINISH();
+        case 0xC2: d->kind = K_RETI; d->imm = fN(&f, 2); if (f.err) return false; FINISH();
+        case 0xE8: { int64_t disp = fsN(&f, 4); if (f.err) return false;
+                     d->kind = K_CALL; d->rip_next = c->rip; d->target = c->rip + (uint64_t)disp; return true; }
+        case 0xE9: { int64_t disp = fsN(&f, 4); if (f.err) return false;
+                     d->kind = K_JMP; d->rip_next = c->rip; d->target = c->rip + (uint64_t)disp; return true; }
+        case 0xEB: { int64_t disp = fsN(&f, 1); if (f.err) return false;
+                     d->kind = K_JMP; d->rip_next = c->rip; d->target = c->rip + (uint64_t)disp; return true; }
+        case 0xFF: case 0xFE: {
+            FORM();
+            int sub = d->reg & 7;
+            d->osize = op == 0xFE ? 1 : (uint8_t)osize;
+            if (sub == 0) { d->kind = K_INC_RM; FINISH(); }
+            if (sub == 1) { d->kind = K_DEC_RM; FINISH(); }
+            if (sub == 2) { d->kind = K_CALL_RM; FINISH(); }
+            if (sub == 4) { d->kind = K_JMP_RM; FINISH(); }
+            if (sub == 6) { d->kind = K_PUSH_RM; FINISH(); }
+            BAD();
+        }
+        default: break;
+    }
+
+    // ALU con ModRM: 00-3D
+    if (op <= 0x3D && ((op & 7) <= 5)) {
+        int which = (op >> 3) & 7, form = op & 7;
+        d->which = (uint8_t)which;
+        if (form <= 3) {
+            d->osize = (form & 1) ? (uint8_t)osize : 1;
+            FORM();
+            d->kind = (form <= 1) ? K_ALU_RM_R : K_ALU_R_RM;
+            FINISH();
+        }
+        // acumulador con inmediato
+        d->osize = (form & 1) ? (uint8_t)osize : 1;
+        uint64_t imm;
+        if (form & 1) imm = osize == 8 ? (uint64_t)fsN(&f, 4) : fN(&f, osize == 2 ? 2 : 4);
+        else imm = fN(&f, 1);
+        if (f.err) return false;
+        d->kind = K_ALU_A_I; d->imm = imm;
+        FINISH();
+    }
+    if (op == 0x84 || op == 0x85 || op == 0x86 || op == 0x87) {
+        d->osize = (op & 1) ? (uint8_t)osize : 1;
+        FORM();
+        d->kind = op >= 0x86 ? K_XCHG_RM_R : K_TEST_RM_R;
+        FINISH();
+    }
+    if (op == 0x88 || op == 0x89 || op == 0x8A || op == 0x8B || op == 0x8D) {
+        d->osize = (op & 1) ? (uint8_t)osize : 1;
+        FORM();
+        if (op == 0x8D) { d->kind = K_LEA; d->osize = (uint8_t)osize; FINISH(); }
+        d->kind = op <= 0x89 ? K_MOV_RM_R : K_MOV_R_RM;
+        FINISH();
+    }
+    if (op == 0x80 || op == 0x81 || op == 0x83) {
+        d->osize = op == 0x80 ? 1 : (uint8_t)osize;
+        FORM();
+        uint64_t imm;
+        if (op == 0x81) imm = osize == 8 ? (uint64_t)fsN(&f, 4) : fN(&f, osize == 2 ? 2 : 4);
+        else if (op == 0x83) imm = (uint64_t)fsN(&f, 1);
+        else imm = fN(&f, 1);
+        if (f.err) return false;
+        d->kind = K_ALU_RM_I; d->which = d->reg & 7; d->imm = imm;
+        FINISH();
+    }
+    if (op == 0xC6 || op == 0xC7) {
+        d->osize = op == 0xC6 ? 1 : (uint8_t)osize;
+        FORM();
+        if ((d->reg & 7) != 0) BAD();
+        uint64_t imm = op == 0xC6 ? fN(&f, 1) : (osize == 8 ? (uint64_t)fsN(&f, 4) : fN(&f, osize == 2 ? 2 : 4));
+        if (f.err) return false;
+        d->kind = K_MOV_RM_I; d->imm = imm;
+        FINISH();
+    }
+    if (op == 0xC0 || op == 0xC1 || (op >= 0xD0 && op <= 0xD3)) {
+        d->osize = (op == 0xC0 || op == 0xD0 || op == 0xD2) ? 1 : (uint8_t)osize;
+        FORM();
+        d->which = d->reg & 7;
+        if (d->which == 2 || d->which == 3 || d->which == 6) BAD(); // RCL/RCR/SHLD: no soportados (como el clasico)
+        if (op == 0xC0 || op == 0xC1) { d->kind = K_SHIFT_I; d->imm = f8(&f); if (f.err) return false; }
+        else if (op == 0xD0 || op == 0xD1) d->kind = K_SHIFT_1;
+        else d->kind = K_SHIFT_CL;
+        FINISH();
+    }
+    if (op == 0xF6 || op == 0xF7) { // grupo 3: fallback al clasico
+        FORM();
+        int sub = d->reg & 7;
+        if (sub == 0 || sub == 1) { // TEST con inmediato: hay que saltarlo
+            if (op == 0xF6) fN(&f, 1); else fN(&f, osize == 2 ? 2 : 4);
+            if (f.err) return false;
+        }
+        STEP();
+    }
+    if (op == 0x69 || op == 0x6B) {
+        FORM();
+        uint64_t imm = op == 0x69 ? (uint64_t)fsN(&f, osize == 2 ? 2 : 4) : (uint64_t)fsN(&f, 1);
+        if (f.err) return false;
+        d->kind = K_IMUL_R_RM_I; d->imm = imm;
+        FINISH();
+    }
+    if (op == 0x0F) {
+        uint8_t op2 = f8(&f); if (f.err) return false;
+        if (op2 >= 0x80 && op2 <= 0x8F) {
+            int64_t disp = fsN(&f, 4); if (f.err) return false;
+            d->kind = K_JCC; d->which = op2 & 0xF; d->rip_next = c->rip;
+            d->target = c->rip + (uint64_t)disp;
+            return true;
+        }
+        if (op2 == 0x05) { d->kind = K_SYSCALL; FINISH(); }
+        if (op2 == 0xAF) { FORM(); d->kind = K_IMUL_R_RM; FINISH(); }
+        if (op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE || op2 == 0xBF || op2 == 0x63) {
+            d->ssize = (op2 == 0xB7 || op2 == 0xBF) ? 2 : (op2 == 0x63 ? 4 : 1);
+            FORM();
+            d->kind = (op2 == 0xBE || op2 == 0xBF || op2 == 0x63) ? K_MOVSX : K_MOVZX;
+            FINISH();
+        }
+        if (op2 >= 0x90 && op2 <= 0x9F) { FORM(); d->osize = 1; d->kind = K_SETCC; d->which = op2 & 0xF; FINISH(); }
+        if (op2 >= 0x40 && op2 <= 0x4F) { FORM(); STEP(); } // CMOV: fallback
+        if (op2 == 0x1F) { FORM(); d->kind = K_NOP; FINISH(); }
+        d->kind = K_BAD; d->imm = op2; FINISH();
+    }
+    BAD();
+#undef FORM
+#undef FINISH
+#undef BAD
+#undef STEP
+}
+
+// ---------- acceso a operandos decodificados ----------
+static uint64_t dec_ea(X64Cpu *c, Dec *d) {
+    if (d->base_reg == 254) return (uint64_t)d->disp; // absoluta (RIP-rel resuelta)
+    uint64_t a = (uint64_t)d->disp;
+    if (d->base_reg != 255) a += c->r[d->base_reg];
+    if (d->idx_reg != 255) a += c->r[d->idx_reg] * d->scale;
+    return a;
+}
+static uint64_t dec_rd(X64Cpu *c, Dec *d, unsigned sz, bool *ok) {
+    if (d->is_mem) return mem_rd(c, dec_ea(c, d), sz, ok);
+    if (sz == 1 && !d->has_rex && d->rm_reg >= 4 && d->rm_reg <= 7)
+        return (c->r[d->rm_reg - 4] >> 8) & 0xFF;
+    return reg_rd(c, d->rm_reg, sz);
+}
+static void dec_wr(X64Cpu *c, Dec *d, uint64_t v, unsigned sz, bool *ok) {
+    if (d->is_mem) { mem_wr(c, dec_ea(c, d), v, sz, ok); return; }
+    if (sz == 1 && !d->has_rex && d->rm_reg >= 4 && d->rm_reg <= 7) {
+        reg_wr(c, d->rm_reg - 4, v, 1, true); return;
+    }
+    reg_wr(c, d->rm_reg, v, sz, false);
+}
+static uint64_t dec_regrd(X64Cpu *c, Dec *d, unsigned sz) {
+    if (sz == 1 && !d->has_rex && d->reg >= 4 && d->reg <= 7)
+        return (c->r[d->reg - 4] >> 8) & 0xFF;
+    return reg_rd(c, d->reg, sz);
+}
+static void dec_regwr(X64Cpu *c, Dec *d, uint64_t v, unsigned sz) {
+    if (sz == 1 && !d->has_rex && d->reg >= 4 && d->reg <= 7) {
+        reg_wr(c, d->reg - 4, v, 1, true); return;
+    }
+    reg_wr(c, d->reg, v, sz, false);
+}
+
+// ---------- cache de bloques ----------
+#define BLOCK_MAX 64
+#define CACHE_SLOTS 16384
+typedef struct Block {
+    uint64_t start;
+    int n;
+    Dec ins[BLOCK_MAX];
+} Block;
+// Cache directa (una entrada por ranura, la colision expulsa): una sola
+// sonda de array por bloque, sin listas ni persecucion de punteros.
+typedef struct { Block *slots[CACHE_SLOTS]; } Cache;
+
+void x64_enable_cache(X64Cpu *cpu) {
+    if (!cpu->cache) cpu->cache = calloc(1, sizeof(Cache));
+}
+void x64_cache_clear(X64Cpu *cpu) {
+    if (!cpu->cache) return;
+    Cache *ch = (Cache *)cpu->cache;
+    for (int i = 0; i < CACHE_SLOTS; i++) {
+        free(ch->slots[i]);
+        ch->slots[i] = NULL;
+    }
+}
+static Block *cache_find(Cache *ch, uint64_t start) {
+    Block *b = ch->slots[(start >> 3) & (CACHE_SLOTS - 1)];
+    return (b && b->start == start) ? b : NULL;
+}
+static bool block_is_end(uint8_t kind) {
+    return kind == K_JMP || kind == K_JCC || kind == K_CALL || kind == K_RET ||
+           kind == K_RETI || kind == K_CALL_RM || kind == K_JMP_RM ||
+           kind == K_HALT || kind == K_SYSCALL || kind == K_STEP || kind == K_BAD;
+}
+static Block *cache_decode(X64Cpu *c, Cache *ch, uint64_t start) {
+    Block *b = (Block *)calloc(1, sizeof(Block));
+    if (!b) return NULL;
+    b->start = start;
+    c->rip = start;
+    while (b->n < BLOCK_MAX) {
+        Dec *d = &b->ins[b->n];
+        if (!decode_one(c, d)) { // fetch fuera de memoria
+            d->kind = K_BAD; d->imm = 0; d->rip = c->rip; d->rip_next = c->rip;
+            b->n++;
+            break;
+        }
+        b->n++;
+        if (block_is_end(d->kind)) break;
+    }
+    unsigned h = (start >> 3) & (CACHE_SLOTS - 1);
+    free(ch->slots[h]); // expulsa al anterior si lo habia
+    ch->slots[h] = b;
+    return b;
+}
+
+// ---------- ejecutor de bloques ----------
+// Devuelve el estado; c->rip queda en la siguiente direccion a ejecutar.
+static X64Status exec_block(X64Cpu *c, Block *b) {
+    bool ok = true;
+    for (int i = 0; i < b->n; i++) {
+        Dec *d = &b->ins[i];
+        unsigned sz = d->osize;
+        switch (d->kind) {
+            case K_NOP: break;
+            case K_HALT: c->rip = d->rip_next; return X64_HALT;
+            case K_BAD: c->bad_opcode = (uint8_t)d->imm; c->bad_rip = d->rip; c->rip = d->rip; return X64_ERR_OPCODE;
+            case K_STEP: {
+                c->rip = d->rip;
+                X64Status s = x64_step(c); // cuenta su propio paso
+                return s == X64_OK ? X64_OK : s;
+            }
+            case K_SYSCALL:
+                if (c->r[X64_RAX] == 60) { c->exit_code = (int)c->r[X64_RDI]; c->rip = d->rip_next; return X64_HALT; }
+                c->bad_opcode = 0x05; c->bad_rip = d->rip; c->rip = d->rip; return X64_ERR_OPCODE;
+            case K_MOV_RM_R: dec_wr(c, d, dec_regrd(c, d, sz), sz, &ok); break;
+            case K_MOV_R_RM: { uint64_t v = dec_rd(c, d, sz, &ok); if (ok) dec_regwr(c, d, v, sz); } break;
+            case K_MOV_RM_I: dec_wr(c, d, d->imm, sz, &ok); break;
+            case K_MOV_R_I: c->r[d->reg] = d->imm; break;
+            case K_MOV_R8_I:
+                if (d->has_rex || d->reg < 4) reg_wr(c, d->reg, d->imm, 1, false);
+                else reg_wr(c, d->reg - 4, d->imm, 1, true);
+                break;
+            case K_LEA: dec_regwr(c, d, dec_ea(c, d), sz); break;
+            case K_ALU_RM_R: {
+                uint64_t r = alu(c, d->which, dec_rd(c, d, sz, &ok), dec_regrd(c, d, sz), sz, true);
+                if (ok && d->which != 7) dec_wr(c, d, r, sz, &ok);
+                break; }
+            case K_ALU_R_RM: {
+                uint64_t r = alu(c, d->which, dec_regrd(c, d, sz), dec_rd(c, d, sz, &ok), sz, true);
+                if (ok && d->which != 7) dec_regwr(c, d, r, sz);
+                break; }
+            case K_ALU_RM_I: {
+                uint64_t r = alu(c, d->which, dec_rd(c, d, sz, &ok), d->imm, sz, true);
+                if (ok && d->which != 7) dec_wr(c, d, r, sz, &ok);
+                break; }
+            case K_ALU_A_I: {
+                uint64_t r = alu(c, d->which, reg_rd(c, 0, sz), d->imm, sz, true);
+                if (d->which != 7) reg_wr(c, 0, r, sz, false);
+                break; }
+            case K_TEST_RM_R: alu(c, 4, dec_rd(c, d, sz, &ok), dec_regrd(c, d, sz), sz, true); break;
+            case K_XCHG_RM_R: {
+                uint64_t a = dec_rd(c, d, sz, &ok); if (!ok) break;
+                uint64_t g = dec_regrd(c, d, sz);
+                dec_wr(c, d, g, sz, &ok); if (ok) dec_regwr(c, d, a, sz);
+                break; }
+            case K_XCHG_A_R: {
+                uint64_t t = reg_rd(c, d->reg, sz);
+                reg_wr(c, d->reg, reg_rd(c, 0, sz), sz, false);
+                reg_wr(c, 0, t, sz, false);
+                break; }
+            case K_INC_RM: case K_DEC_RM: {
+                uint64_t a = dec_rd(c, d, sz, &ok); if (!ok) break;
+                uint64_t cf = c->flags & X64_CF;
+                uint64_t r = alu(c, d->kind == K_INC_RM ? 0 : 5, a, 1, sz, true);
+                set_flag(c, X64_CF, cf != 0);
+                dec_wr(c, d, r, sz, &ok);
+                break; }
+            case K_PUSH_R: if (!push(c, c->r[d->reg])) return X64_ERR_MEM; break;
+            case K_POP_R: { uint64_t v = pop(c, &ok); if (!ok) return X64_ERR_MEM; c->r[d->reg] = v; } break;
+            case K_PUSH_I: if (!push(c, d->imm)) return X64_ERR_MEM; break;
+            case K_PUSH_RM: { uint64_t v = dec_rd(c, d, sz, &ok); if (!ok || !push(c, v)) return X64_ERR_MEM; } break;
+            case K_CALL_RM: {
+                uint64_t t = dec_rd(c, d, sz, &ok); if (!ok) return X64_ERR_MEM;
+                if (!push(c, d->rip_next)) return X64_ERR_MEM;
+                c->rip = t; c->steps++; return X64_OK; }
+            case K_JMP_RM: c->rip = dec_rd(c, d, sz, &ok); if (!ok) return X64_ERR_MEM; c->steps++; return X64_OK;
+            case K_JMP: c->rip = d->target; c->steps++; return X64_OK;
+            case K_JCC: c->rip = cond(c, d->which) ? d->target : d->rip_next; c->steps++; return X64_OK;
+            case K_CALL:
+                if (!push(c, d->rip_next)) return X64_ERR_MEM;
+                c->rip = d->target; c->steps++; return X64_OK;
+            case K_RET: { uint64_t v = pop(c, &ok); if (!ok) return X64_ERR_MEM; c->rip = v; c->steps++; return X64_OK; }
+            case K_RETI: { uint64_t v = pop(c, &ok); if (!ok) return X64_ERR_MEM; c->rip = v; c->r[X64_RSP] += d->imm; c->steps++; return X64_OK; }
+            case K_SHIFT_I: case K_SHIFT_1: case K_SHIFT_CL: {
+                unsigned cnt = d->kind == K_SHIFT_I ? (unsigned)d->imm : d->kind == K_SHIFT_1 ? 1 : (unsigned)(c->r[X64_RCX] & 0xFF);
+                cnt &= (sz == 8 ? 63 : 31);
+                uint64_t a = dec_rd(c, d, sz, &ok); if (!ok) break;
+                if (cnt == 0) break;
+                uint64_t mask = sz == 8 ? ~0ull : ((1ull << (sz * 8)) - 1);
+                uint64_t sign = 1ull << (sz * 8 - 1);
+                uint64_t res = 0;
+                switch (d->which) {
+                    case 0: res = ((a << cnt) | (a >> (sz * 8 - cnt))) & mask;
+                        set_flag(c, X64_CF, res & 1); if (cnt == 1) set_flag(c, X64_OF, ((res & sign) != 0) != ((c->flags & X64_CF) != 0));
+                        break;
+                    case 1: res = ((a >> cnt) | (a << (sz * 8 - cnt))) & mask;
+                        set_flag(c, X64_CF, (res & sign) != 0); if (cnt == 1) set_flag(c, X64_OF, ((res & sign) != 0) != ((res & (sign >> 1)) != 0));
+                        break;
+                    case 4: res = (a << cnt) & mask;
+                        set_flag(c, X64_CF, (a >> (sz * 8 - cnt)) & 1);
+                        if (cnt == 1) set_flag(c, X64_OF, ((res & sign) != 0) != ((c->flags & X64_CF) != 0));
+                        flags_sz_p(c, res, sz);
+                        break;
+                    case 5: res = (a & mask) >> cnt;
+                        set_flag(c, X64_CF, (a >> (cnt - 1)) & 1);
+                        if (cnt == 1) set_flag(c, X64_OF, (a & sign) != 0);
+                        flags_sz_p(c, res, sz);
+                        break;
+                    case 7: res = (uint64_t)(sext(a, sz) >> cnt) & mask;
+                        set_flag(c, X64_CF, (sext(a, sz) >> (cnt - 1)) & 1);
+                        if (cnt == 1) set_flag(c, X64_OF, false);
+                        flags_sz_p(c, res, sz);
+                        break;
+                    default: c->bad_opcode = 0; c->bad_rip = d->rip; return X64_ERR_OPCODE;
+                }
+                dec_wr(c, d, res, sz, &ok);
+                break; }
+            case K_IMUL_R_RM: {
+                uint64_t a = dec_rd(c, d, sz, &ok); if (!ok) break;
+                int64_t r = sext(dec_regrd(c, d, sz), sz) * sext(a, sz);
+                bool ovf = r != sext((uint64_t)r, sz);
+                set_flag(c, X64_CF, ovf); set_flag(c, X64_OF, ovf);
+                dec_regwr(c, d, (uint64_t)r, sz);
+                break; }
+            case K_IMUL_R_RM_I: {
+                uint64_t a = dec_rd(c, d, sz, &ok); if (!ok) break;
+                int64_t r = sext(a, sz) * (int64_t)d->imm;
+                bool ovf = r != sext((uint64_t)r, sz);
+                set_flag(c, X64_CF, ovf); set_flag(c, X64_OF, ovf);
+                dec_regwr(c, d, (uint64_t)r, sz);
+                break; }
+            case K_MOVZX: { uint64_t a = dec_rd(c, d, d->ssize, &ok); if (ok) dec_regwr(c, d, a, sz); } break;
+            case K_MOVSX: { uint64_t a = dec_rd(c, d, d->ssize, &ok); if (ok) dec_regwr(c, d, (uint64_t)sext(a, d->ssize), sz); } break;
+            case K_SETCC: dec_wr(c, d, cond(c, d->which) ? 1 : 0, 1, &ok); break;
+            case K_CBW:
+                if (sz == 8) c->r[0] = (uint64_t)sext(c->r[0] & 0xFFFFFFFFull, 4);
+                else if (d->ssize) reg_wr(c, 0, (uint64_t)sext(c->r[0] & 0xFF, 1), 2, false);
+                else c->r[0] = (c->r[0] & ~0xFFFFFFFFull) | (uint32_t)sext(c->r[0] & 0xFFFF, 2);
+                break;
+            case K_CQO:
+                if (sz == 8) c->r[2] = ((int64_t)c->r[0] < 0) ? ~0ull : 0;
+                else if (d->ssize) reg_wr(c, 2, ((int16_t)c->r[0] < 0) ? 0xFFFF : 0, 2, false);
+                else c->r[2] = (c->r[2] & ~0xFFFFFFFFull) | (((int32_t)c->r[0] < 0) ? 0xFFFFFFFFu : 0);
+                break;
+            default:
+                c->bad_opcode = 0; c->bad_rip = d->rip; return X64_ERR_OPCODE;
+        }
+        if (!ok) return X64_ERR_MEM;
+        c->steps++;
+    }
+    c->rip = b->ins[b->n - 1].rip_next;
+    return X64_OK;
+}
+
+X64Status x64_run_cached(X64Cpu *c, uint64_t max_steps) {
+    if (!c->cache) x64_enable_cache(c);
+    Cache *ch = (Cache *)c->cache;
+    for (;;) {
+        Block *b = cache_find(ch, c->rip);
+        if (!b) {
+            b = cache_decode(c, ch, c->rip);
+            if (!b) return X64_ERR_MEM;
+        }
+        X64Status s = exec_block(c, b);
+        if (s != X64_OK) return s;
+        if (c->steps >= max_steps) return X64_ERR_STEPS;
     }
 }

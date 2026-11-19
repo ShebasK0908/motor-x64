@@ -28,12 +28,14 @@ const char *motor_report(void) {
     if (!mem) return "ERROR|sin memoria";
     size_t off = 0;
     unsigned long long total_pasos = 0;
+    static X64Cpu cpu; // estatica: la cache arranca a cero
+    x64_enable_cache(&cpu);
     for (size_t i = 0; i < sizeof(PRUEBAS) / sizeof(PRUEBAS[0]); i++) {
         const Prueba *p = &PRUEBAS[i];
-        X64Cpu cpu;
         x64_init(&cpu, mem, MEM, 0);
         x64_load(&cpu, 0, p->code, p->len);
-        X64Status s = x64_run(&cpu, 100000000ull);
+        x64_cache_clear(&cpu); // otro programa en las mismas direcciones
+        X64Status s = x64_run_cached(&cpu, 100000000ull);
         total_pasos += cpu.steps;
         int ok = s == X64_HALT
               && cpu.r[X64_RBX] == p->esperado_rbx

@@ -42,6 +42,7 @@ typedef struct {
     int      exit_code;  // si X64_HALT por syscall exit
     uint8_t  bad_opcode; // si X64_ERR_OPCODE
     uint64_t bad_rip;
+    void    *cache;      // v0.3: cache de bloques decodificados (opaco)
 } X64Cpu;
 
 // Inicializa la CPU: memoria a cero, RSP al final de la memoria, RIP = entry.
@@ -50,6 +51,12 @@ void x64_init(X64Cpu *cpu, uint8_t *mem, uint64_t mem_size, uint64_t entry);
 bool x64_load(X64Cpu *cpu, uint64_t addr, const uint8_t *data, uint64_t len);
 // Ejecuta hasta halt/error o agotar max_steps. Devuelve el estado final.
 X64Status x64_run(X64Cpu *cpu, uint64_t max_steps);
+// v0.3: activa la cache de bloques decodificados (mas rapido).
+void x64_enable_cache(X64Cpu *cpu);
+// Vacia la cache (obligatorio al cargar un programa distinto en la misma CPU).
+void x64_cache_clear(X64Cpu *cpu);
+// Como x64_run pero usando la cache de bloques si esta activa.
+X64Status x64_run_cached(X64Cpu *cpu, uint64_t max_steps);
 // Ejecuta una sola instruccion (para depurar).
 X64Status x64_step(X64Cpu *cpu);
 

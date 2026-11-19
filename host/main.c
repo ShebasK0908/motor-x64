@@ -53,7 +53,9 @@ int main(int argc, char **argv) {
 
     const uint64_t MEM = 256ull << 20;
     uint8_t *mem = malloc(MEM);
-    X64Cpu cpu;
+    static X64Cpu cpu; // estatica: cache a cero al arrancar
+    int fast = 0;
+    for (int i = 2; i < argc; i++) if (strcmp(argv[i], "--fast") == 0) fast = 1;
     int es_elf = n >= 4 && code[0] == 0x7F && code[1] == 'E' && code[2] == 'L' && code[3] == 'F';
     if (es_elf) {
         x64_init(&cpu, mem, MEM, 0);
@@ -70,8 +72,11 @@ int main(int argc, char **argv) {
         if (!x64_load(&cpu, 0, code, n)) { fprintf(stderr, "no cabe\n"); return 2; }
     }
 
-    uint64_t max_steps = argc > 2 ? strtoull(argv[2], NULL, 0) : 200000000ull;
-    X64Status s = x64_run(&cpu, max_steps);
+    uint64_t max_steps = 200000000ull;
+    for (int i = 2; i < argc; i++) if (argv[i][0] >= '0' && argv[i][0] <= '9') max_steps = strtoull(argv[i], NULL, 0);
+    if (fast) x64_enable_cache(&cpu);
+    X64Status s = fast ? x64_run_cached(&cpu, max_steps) : x64_run(&cpu, max_steps);
+    printf("modo=%s ", fast ? "rapido" : "clasico");
     const char *sn = s == X64_HALT ? "HALT" : s == X64_ERR_OPCODE ? "OPCODE_NO_SOPORTADO"
                    : s == X64_ERR_MEM ? "ERROR_MEMORIA" : "LIMITE_PASOS";
     printf("estado=%s pasos=%llu exit=%d RBX=%llu RCX=%llu RAX=%llu\n",
